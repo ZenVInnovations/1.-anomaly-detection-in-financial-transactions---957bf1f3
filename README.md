@@ -1,4 +1,4 @@
-# 💳 Anomaly Detection in Financial Transactions
+# 💳 Anomaly Detection in Financial Transactions #
 
 Detects fraud-like behavior in financial transactions using:
 
