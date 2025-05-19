@@ -3,15 +3,16 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
-from sklearn.metrics import confusion_matrix, classification_report
-import matplotlib.pyplot as plt
-import seaborn as sns
+from sklearn.metrics import classification_report, confusion_matrix
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense
 from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+import seaborn as sns
+import io
 
 st.set_page_config(page_title="Anomaly Detection", layout="wide")
-st.markdown("<h1 style='text-align: center;'>🔍 Anomaly Detection in Financial Transactions</h1>", unsafe_allow_html=True)
+st.title("🔍 Anomaly Detection in Financial Transactions")
 
 uploaded_file = st.file_uploader("📂 Upload your CSV file (e.g., creditcard.csv)", type=["csv"])
 
@@ -19,43 +20,54 @@ if uploaded_file is not None:
     df = pd.read_csv(uploaded_file)
     st.success("✅ File uploaded successfully!")
 
-    if 'Amount' in df.columns and 'Time' in df.columns:
+    if 'Amount' in df.columns:
+        if 'Time' in df.columns:
+            df.drop(['Time'], axis=1, inplace=True)
+
         df['Amount'] = StandardScaler().fit_transform(df[['Amount']])
-        df.drop(['Time'], axis=1, inplace=True)
+
+        # Calculate true anomaly rate (capped at 20%)
+        true_anomaly_ratio = df['Class'].mean()
+        if true_anomaly_ratio > 0.2:
+            st.warning(f"⚠️ High anomaly rate detected: {true_anomaly_ratio:.2%}. Capping threshold at 20%.")
+            true_anomaly_ratio = 0.2
 
         model_option = st.radio("🤖 Choose model to apply:", ["Isolation Forest", "Autoencoder", "Both"], horizontal=True)
 
         if st.button("🚀 Run Detection"):
+            report_buffer = io.StringIO()
+
             if model_option in ["Isolation Forest", "Both"]:
                 st.subheader("🔍 Isolation Forest")
-                iso_model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
+                iso_model = IsolationForest(n_estimators=200, contamination=true_anomaly_ratio, random_state=42)
                 iso_model.fit(df.drop('Class', axis=1))
                 df['anomaly_if'] = iso_model.predict(df.drop('Class', axis=1))
                 df['anomaly_if'] = df['anomaly_if'].apply(lambda x: 1 if x == -1 else 0)
 
-                cm = confusion_matrix(df['Class'], df['anomaly_if'])
-                st.text("Confusion Matrix (IF):")
-                st.text(cm)
-                st.text("Classification Report (IF):")
-                st.text(classification_report(df['Class'], df['anomaly_if'], digits=4))
+                cm_if = confusion_matrix(df['Class'], df['anomaly_if'])
+                report_if = classification_report(df['Class'], df['anomaly_if'], output_dict=True, digits=4)
+                st.dataframe(pd.DataFrame(cm_if, columns=["Predicted Normal", "Predicted Anomaly"], index=["Actual Normal", "Actual Fraud"]))
+                st.dataframe(pd.DataFrame(report_if).T)
 
-                # Bar chart
+                # Bar Chart
                 st.subheader("📊 IF Bar Chart")
-                counts = pd.Series(df['anomaly_if']).value_counts().sort_index()
-                fig1, ax1 = plt.subplots()
-                sns.barplot(x=counts.index.map({0: 'Normal', 1: 'Anomaly'}), y=counts.values, ax=ax1)
-                ax1.set_ylabel("Count")
-                st.pyplot(fig1)
+                fig_bar_if, ax_bar_if = plt.subplots()
+                df['anomaly_if'].value_counts().sort_index().plot(kind='bar', ax=ax_bar_if)
+                ax_bar_if.set_xticks([0, 1])
+                ax_bar_if.set_xticklabels(['Normal', 'Anomaly'])
+                ax_bar_if.set_ylabel('Count')
+                st.pyplot(fig_bar_if)
 
-                # Pie chart
+                # Pie Chart
                 st.subheader("🥧 IF Pie Chart")
-                fig2, ax2 = plt.subplots()
-                ax2.pie(counts.values, labels=['Normal', 'Anomaly'], autopct='%1.1f%%', startangle=90)
-                ax2.axis('equal')
-                st.pyplot(fig2)
+                fig_pie_if, ax_pie_if = plt.subplots()
+                df['anomaly_if'].value_counts().plot.pie(autopct='%1.1f%%', labels=['Normal', 'Anomaly'], ax=ax_pie_if)
+                ax_pie_if.axis('equal')
+                st.pyplot(fig_pie_if)
 
-                anomalies_if = df[df['anomaly_if'] == 1]
-                st.download_button("📥 Download IF Anomalies (CSV)", anomalies_if.to_csv(index=False).encode('utf-8'), "if_anomalies.csv")
+                report_buffer.write("Isolation Forest Classification Report:\n")
+                report_buffer.write(pd.DataFrame(report_if).T.to_string())
+                report_buffer.write("\n\n")
 
             if model_option in ["Autoencoder", "Both"]:
                 st.subheader("🔁 Autoencoder")
@@ -66,43 +78,47 @@ if uploaded_file is not None:
 
                 input_dim = X_train.shape[1]
                 input_layer = Input(shape=(input_dim,))
-                encoder = Dense(16, activation='relu')(input_layer)
-                encoder = Dense(8, activation='relu')(encoder)
-                decoder = Dense(16, activation='relu')(encoder)
-                decoder = Dense(input_dim, activation='linear')(decoder)
-                autoencoder = Model(inputs=input_layer, outputs=decoder)
+                encoded = Dense(32, activation='relu')(input_layer)
+                encoded = Dense(16, activation='relu')(encoded)
+                decoded = Dense(32, activation='relu')(encoded)
+                decoded = Dense(input_dim, activation='linear')(decoded)
+
+                autoencoder = Model(inputs=input_layer, outputs=decoded)
                 autoencoder.compile(optimizer='adam', loss='mse')
-                autoencoder.fit(X_train, X_train, epochs=10, batch_size=64, validation_data=(X_test, X_test), verbose=0)
+                autoencoder.fit(X_train, X_train, epochs=20, batch_size=64, validation_data=(X_test, X_test), verbose=0)
 
                 X_all = df.drop(['Class'], axis=1)
                 if 'anomaly_if' in X_all.columns:
                     X_all = X_all.drop(['anomaly_if'], axis=1)
-
                 reconstructions = autoencoder.predict(X_all)
                 mse = np.mean(np.power(X_all - reconstructions, 2), axis=1)
-                threshold = np.percentile(mse, 99)
+                ae_threshold = np.percentile(mse, 100 - (true_anomaly_ratio * 100))
                 df['ae_error'] = mse
-                df['ae_anomaly'] = (mse > threshold).astype(int)
+                df['ae_anomaly'] = (df['ae_error'] > ae_threshold).astype(int)
 
-                st.text("Confusion Matrix (AE):")
-                st.text(confusion_matrix(df['Class'], df['ae_anomaly']))
-                st.text("Classification Report (AE):")
-                st.text(classification_report(df['Class'], df['ae_anomaly'], digits=4))
+                cm_ae = confusion_matrix(df['Class'], df['ae_anomaly'])
+                report_ae = classification_report(df['Class'], df['ae_anomaly'], output_dict=True, digits=4)
+                st.dataframe(pd.DataFrame(cm_ae, columns=["Predicted Normal", "Predicted Anomaly"], index=["Actual Normal", "Actual Fraud"]))
+                st.dataframe(pd.DataFrame(report_ae).T)
 
-                # Bar chart
+                # Bar Chart
                 st.subheader("📊 AE Bar Chart")
-                counts_ae = pd.Series(df['ae_anomaly']).value_counts().sort_index()
-                fig3, ax3 = plt.subplots()
-                sns.barplot(x=counts_ae.index.map({0: 'Normal', 1: 'Anomaly'}), y=counts_ae.values, ax=ax3)
-                ax3.set_ylabel("Count")
-                st.pyplot(fig3)
+                fig_bar_ae, ax_bar_ae = plt.subplots()
+                df['ae_anomaly'].value_counts().sort_index().plot(kind='bar', ax=ax_bar_ae)
+                ax_bar_ae.set_xticks([0, 1])
+                ax_bar_ae.set_xticklabels(['Normal', 'Anomaly'])
+                ax_bar_ae.set_ylabel('Count')
+                st.pyplot(fig_bar_ae)
 
-                # Pie chart
+                # Pie Chart
                 st.subheader("🥧 AE Pie Chart")
-                fig4, ax4 = plt.subplots()
-                ax4.pie(counts_ae.values, labels=['Normal', 'Anomaly'], autopct='%1.1f%%', startangle=90)
-                ax4.axis('equal')
-                st.pyplot(fig4)
+                fig_pie_ae, ax_pie_ae = plt.subplots()
+                df['ae_anomaly'].value_counts().plot.pie(autopct='%1.1f%%', labels=['Normal', 'Anomaly'], ax=ax_pie_ae)
+                ax_pie_ae.axis('equal')
+                st.pyplot(fig_pie_ae)
 
-                anomalies_ae = df[df['ae_anomaly'] == 1]
-                st.download_button("📥 Download AE Anomalies (CSV)", anomalies_ae.to_csv(index=False).encode('utf-8'), "ae_anomalies.csv")
+                report_buffer.write("Autoencoder Classification Report:\n")
+                report_buffer.write(pd.DataFrame(report_ae).T.to_string())
+
+            st.download_button("📄 Download Classification Report", report_buffer.getvalue(), file_name="classification_report.txt")
+            st.success("✅ Detection completed!")

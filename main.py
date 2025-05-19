@@ -1,104 +1,84 @@
-import sys
 import pandas as pd
-import seaborn as sns
+import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from sklearn.ensemble import IsolationForest
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.model_selection import train_test_split
 from tensorflow.keras.models import Model
 from tensorflow.keras.layers import Input, Dense
-from sklearn.model_selection import train_test_split
-import numpy as np
-
-# === Environment Check ===
-print("Python Interpreter:", sys.executable)
-print("Seaborn version:", sns.__version__)
-print("Pandas version:", pd.__version__)
 
 # === Load Dataset ===
-print("\nLoading dataset...")
 df = pd.read_csv("data/creditcard.csv")
 
 # === Preprocessing ===
-print("\nPreprocessing data...")
+if 'Time' in df.columns:
+    df.drop(['Time'], axis=1, inplace=True)
+
 scaler = StandardScaler()
 df['Amount'] = scaler.fit_transform(df[['Amount']])
-df = df.drop(['Time'], axis=1)
 
-# === Model Selection ===
-print("\nSelect model to run:")
-print("1. Isolation Forest")
-print("2. Autoencoder")
-print("3. Both")
-
-choice = input("Enter your choice (1/2/3): ")
+# === Determine True Anomaly Rate (and cap it at 20%) ===
+true_anomaly_ratio = df['Class'].mean()
+if true_anomaly_ratio > 0.2:
+    print(f"⚠️ High anomaly rate detected: {true_anomaly_ratio:.2%}. Capping threshold at 20%.")
+    true_anomaly_ratio = 0.2
 
 # === Isolation Forest ===
-if choice in ['1', '3']:
-    print("\n=== Isolation Forest ===")
-    model = IsolationForest(n_estimators=100, contamination=0.01, random_state=42)
-    model.fit(df.drop('Class', axis=1))
-    df['anomaly_if'] = model.predict(df.drop('Class', axis=1))
-    df['anomaly_if'] = df['anomaly_if'].apply(lambda x: 1 if x == -1 else 0)
+print("\n[Isolation Forest] Training...")
+iso_model = IsolationForest(n_estimators=200, contamination=true_anomaly_ratio, random_state=42)
+iso_model.fit(df.drop('Class', axis=1))
 
-    print("\nConfusion Matrix (Isolation Forest):")
-    print(confusion_matrix(df['Class'], df['anomaly_if']))
-    print("\nClassification Report (Isolation Forest):")
-    print(classification_report(df['Class'], df['anomaly_if'], digits=4))
+print("[Isolation Forest] Predicting anomalies...")
+df['anomaly_if'] = iso_model.predict(df.drop('Class', axis=1))
+df['anomaly_if'] = df['anomaly_if'].apply(lambda x: 1 if x == -1 else 0)
 
-    df[df['anomaly_if'] == 1].to_csv("anomaly_results.csv", index=False)
-    print("\nAnomalies (Isolation Forest) saved to 'anomaly_results.csv'")
+# === Isolation Forest Results ===
+print("\n[Isolation Forest] Confusion Matrix:")
+cm_if = confusion_matrix(df['Class'], df['anomaly_if'])
+print(pd.DataFrame(cm_if, columns=["Predicted Normal", "Predicted Anomaly"],
+                   index=["Actual Normal", "Actual Fraud"]))
 
-    sns.countplot(x='anomaly_if', data=df)
-    plt.title("Isolation Forest - Detected Anomalies")
-    plt.xlabel("Anomaly (1 = Outlier)")
-    plt.ylabel("Count")
-    plt.show()
+print("\n[Isolation Forest] Classification Report:")
+print(pd.DataFrame(classification_report(df['Class'], df['anomaly_if'], digits=4, output_dict=True)).T)
 
 # === Autoencoder ===
-if choice in ['2', '3']:
-    print("\n🔁 Starting Autoencoder-based Anomaly Detection...")
-    X = df[df['Class'] == 0].drop(['Class'], axis=1)
-    if 'anomaly_if' in X.columns:
-        X = X.drop(['anomaly_if'], axis=1)
-    X_train, X_test = train_test_split(X, test_size=0.2, random_state=42)
+print("\n[Autoencoder] Training...")
+X = df[df['Class'] == 0].drop(['Class', 'anomaly_if'], axis=1)
+X_train, X_test = train_test_split(X, test_size=0.2, random_state=42)
 
-    input_dim = X_train.shape[1]
-    input_layer = Input(shape=(input_dim,))
-    encoder = Dense(16, activation='relu')(input_layer)
-    encoder = Dense(8, activation='relu')(encoder)
-    decoder = Dense(16, activation='relu')(encoder)
-    decoder = Dense(input_dim, activation='linear')(decoder)
-    autoencoder = Model(inputs=input_layer, outputs=decoder)
-    autoencoder.compile(optimizer='adam', loss='mse')
+input_dim = X_train.shape[1]
+input_layer = Input(shape=(input_dim,))
+encoded = Dense(32, activation='relu')(input_layer)
+encoded = Dense(16, activation='relu')(encoded)
+decoded = Dense(32, activation='relu')(encoded)
+decoded = Dense(input_dim, activation='linear')(decoded)
 
-    autoencoder.fit(X_train, X_train, epochs=10, batch_size=64, validation_data=(X_test, X_test), verbose=1)
+autoencoder = Model(inputs=input_layer, outputs=decoded)
+autoencoder.compile(optimizer='adam', loss='mse')
+autoencoder.fit(X_train, X_train, epochs=20, batch_size=64, validation_data=(X_test, X_test), verbose=1)
 
-    X_all = df.drop(['Class'], axis=1)
-    if 'anomaly_if' in X_all.columns:
-        X_all = X_all.drop(['anomaly_if'], axis=1)
-    reconstructions = autoencoder.predict(X_all)
+print("[Autoencoder] Predicting reconstruction errors...")
+X_all = df.drop(['Class', 'anomaly_if'], axis=1)
+reconstructions = autoencoder.predict(X_all)
+mse = np.mean(np.power(X_all - reconstructions, 2), axis=1)
 
-    mse = np.mean(np.power(X_all - reconstructions, 2), axis=1)
-    threshold = np.percentile(mse, 99)
-    df['autoencoder_error'] = mse
-    df['autoencoder_anomaly'] = df['autoencoder_error'] > threshold
-    df['autoencoder_anomaly'] = df['autoencoder_anomaly'].astype(int)
+threshold = np.percentile(mse, 100 - (true_anomaly_ratio * 100))
+print(f"[Autoencoder] Anomaly threshold ({100 - (true_anomaly_ratio * 100):.2f} percentile): {threshold:.6f}")
 
-    print("\nConfusion Matrix (Autoencoder):")
-    print(confusion_matrix(df['Class'], df['autoencoder_anomaly']))
-    print("\nClassification Report (Autoencoder):")
-    print(classification_report(df['Class'], df['autoencoder_anomaly'], digits=4))
+df['ae_error'] = mse
+df['ae_anomaly'] = (df['ae_error'] > threshold).astype(int)
 
-    df[df['autoencoder_anomaly'] == 1].to_csv("autoencoder_anomaly_results.csv", index=False)
-    print("\nAnomalies (Autoencoder) saved to 'autoencoder_anomaly_results.csv'")
+# === Autoencoder Results ===
+print("\n[Autoencoder] Confusion Matrix:")
+cm_ae = confusion_matrix(df['Class'], df['ae_anomaly'])
+print(pd.DataFrame(cm_ae, columns=["Predicted Normal", "Predicted Anomaly"],
+                   index=["Actual Normal", "Actual Fraud"]))
 
-    sns.histplot(df['autoencoder_error'], bins=100, kde=True)
-    plt.axvline(threshold, color='red', linestyle='--', label='Anomaly Threshold')
-    plt.title("Autoencoder Reconstruction Error")
-    plt.xlabel("Error")
-    plt.ylabel("Count")
-    plt.legend()
-    plt.show()
+print("\n[Autoencoder] Classification Report:")
+print(pd.DataFrame(classification_report(df['Class'], df['ae_anomaly'], digits=4, output_dict=True)).T)
 
-input("\nPress Enter to exit...")
+# === Save Results ===
+df.to_csv("full_anomaly_results.csv", index=False)
+print("\n✅ Results saved to 'full_anomaly_results.csv'")
